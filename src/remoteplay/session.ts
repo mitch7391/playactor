@@ -191,19 +191,19 @@ async function openControlSocket(
 
         function onEnd() {
             fail(new Error(
-                "PS5 closed the session control connection before responding",
+                "Remote Play console closed the session control connection before responding",
             ));
         }
 
         function onClose() {
             fail(new Error(
-                "PS5 session control connection closed unexpectedly",
+                "Remote Play session control connection closed unexpectedly",
             ));
         }
 
         function onTimeout() {
             fail(new Error(
-                "Timed out waiting for the PS5 session control response",
+                "Timed out waiting for the Remote Play session control response",
             ));
         }
 

@@ -3,13 +3,13 @@ import net from "net";
 import { Duplex } from "stream";
 import sinon from "sinon";
 
-import { IRemotePlayCredentials } from "../../src/credentials/model";
-import { DeviceType, IDiscoveredDevice } from "../../src/discovery/model";
+import { DeviceType } from "../../src/discovery/model";
 import { RemotePlayPacketCodec } from "../../src/remoteplay/codec";
 import { pickCryptoStrategyForDevice } from "../../src/remoteplay/crypto";
 import { RemotePlayCommand } from "../../src/remoteplay/packets";
 import * as protocol from "../../src/remoteplay/protocol";
 import { openSession } from "../../src/remoteplay/session";
+import { fakeRemotePlayCredentials, fakeRemotePlayDevice } from "./util";
 
 class FakeControlSocket extends Duplex {
     public readonly written: Buffer[] = [];
@@ -36,7 +36,6 @@ class FakeControlSocket extends Duplex {
         this.written.push(Buffer.from(data));
         callback();
 
-        // Respond when PlayActor sends the Login command.
         if (data.length === 8
             && data.readUInt16BE(4) === RemotePlayCommand.Login) {
             setImmediate(() => {
@@ -58,127 +57,170 @@ class FakeControlSocket extends Duplex {
     }
 }
 
+const devices = [
+    {
+        name: "PS5",
+        type: DeviceType.PS5,
+        systemVersion: "14100003",
+        initPath: "/sie/ps5/rp/sess/init",
+        controlPath: "/sie/ps5/rp/sess/ctrl",
+        remotePlayVersion: "1.0",
+    },
+    {
+        name: "PS4 with Remote Play 10.0",
+        type: DeviceType.PS4,
+        systemVersion: "11000000",
+        initPath: "/sie/ps4/rp/sess/init",
+        controlPath: "/sie/ps4/rp/sess/ctrl",
+        remotePlayVersion: "10.0",
+    },
+    {
+        name: "PS4 with Remote Play 9.0",
+        type: DeviceType.PS4,
+        systemVersion: "07000000",
+        initPath: "/sce/rp/session",
+        controlPath: "/sce/rp/session/ctrl",
+        remotePlayVersion: "9.0",
+    },
+    {
+        name: "PS4 with Remote Play 8.0",
+        type: DeviceType.PS4,
+        systemVersion: "06000000",
+        initPath: "/sce/rp/session",
+        controlPath: "/sce/rp/session/ctrl",
+        remotePlayVersion: "8.0",
+    },
+];
+
 describe("RemotePlay session control connection", () => {
     afterEach(() => {
         sinon.restore();
     });
 
-    it("hands an independent TCP socket to Remote Play", async () => {
-        const device = {
-            type: DeviceType.PS5,
-            systemVersion: "14100003",
-            address: {
-                address: "127.0.0.1",
-                port: 9295,
-                family: "IPv4",
-            },
-        } as IDiscoveredDevice;
+    for (const testDevice of devices) {
+        it(`hands an independent TCP socket to Remote Play on ${testDevice.name}`, async () => {
+            const device = fakeRemotePlayDevice(
+                testDevice.type,
+                testDevice.systemVersion,
+            );
 
-        const credentials: IRemotePlayCredentials = {
-            "app-type": "r",
-            "auth-type": "R",
-            "client-type": "vr",
-            "user-credential": "test",
-            accountId: "test",
-            registration: {
-                "AP-Bssid": "test",
-                "AP-Name": "PS5",
-                "RP-KeyType": "2",
-                "RP-Key": "00112233445566778899aabbccddeeff",
-                "PS5-RegistKey": "00112233445566778899aabbccddeeff",
-            },
-        };
+            const credentials = fakeRemotePlayCredentials(
+                testDevice.type,
+            );
 
-        const nonce = Buffer.alloc(16, 0x42);
+            const nonce = Buffer.alloc(16, 0x42);
 
-        sinon.stub(protocol, "request").resolves({
-            headers: {
-                "rp-nonce": nonce.toString("base64"),
-            },
-        } as any);
+            const init = sinon.stub(protocol, "request").resolves({
+                headers: {
+                    "rp-nonce": nonce.toString("base64"),
+                },
+            } as any);
 
-        const serverCodec = new RemotePlayPacketCodec(
-            pickCryptoStrategyForDevice(device),
-            credentials,
-            nonce,
-        );
+            const serverCodec = new RemotePlayPacketCodec(
+                pickCryptoStrategyForDevice(device),
+                credentials,
+                nonce,
+            );
 
-        const serverType = Buffer.alloc(16);
-        serverType[0] = 2;
+            const serverType = Buffer.alloc(16);
+            serverType[0] = 2;
 
-        // First encrypted response: server type.
-        const encryptedServerType = serverCodec
-            .encodeBuffer(serverType)
-            .toString("base64");
+            // The first encrypted response contains the server type.
+            const encryptedServerType = serverCodec
+                .encodeBuffer(serverType)
+                .toString("base64");
 
-        // Second encrypted response: successful login result.
-        // Encryption counters must advance in protocol order.
-        const encryptedLoginResult = serverCodec.encodeBuffer(
-            Buffer.from([0x00]),
-        );
+            // The second encrypted response confirms successful login.
+            const encryptedLoginResult = serverCodec.encodeBuffer(
+                Buffer.from([0x00]),
+            );
 
-        const loginReplyHeader = Buffer.alloc(8);
-        loginReplyHeader.writeUInt32BE(encryptedLoginResult.length, 0);
-        loginReplyHeader.writeUInt16BE(RemotePlayCommand.Login, 4);
+            const loginReplyHeader = Buffer.alloc(8);
+            loginReplyHeader.writeUInt32BE(
+                encryptedLoginResult.length,
+                0,
+            );
+            loginReplyHeader.writeUInt16BE(
+                RemotePlayCommand.Login,
+                4,
+            );
 
-        const loginReply = Buffer.concat([
-            loginReplyHeader,
-            encryptedLoginResult,
-        ]);
+            const loginReply = Buffer.concat([
+                loginReplyHeader,
+                encryptedLoginResult,
+            ]);
 
-        // A heartbeat received in the same TCP chunk as HTTP headers.
-        const heartbeat = Buffer.from([
-            0x00, 0x00, 0x00, 0x00,
-            0x00, 0xfe, 0x00, 0x00,
-        ]);
+            // Include a heartbeat in the same TCP chunk as the
+            // HTTP headers to exercise the socket handover.
+            const heartbeat = Buffer.from([
+                0x00, 0x00, 0x00, 0x00,
+                0x00, 0xfe, 0x00, 0x00,
+            ]);
 
-        const response = Buffer.concat([
-            Buffer.from(
-                "HTTP/1.1 200 OK\r\n"
-                + `RP-Server-Type: ${encryptedServerType}\r\n\r\n`,
-            ),
-            heartbeat,
-        ]);
+            const response = Buffer.concat([
+                Buffer.from(
+                    "HTTP/1.1 200 OK\r\n"
+                    + `RP-Server-Type: ${encryptedServerType}\r\n\r\n`,
+                ),
+                heartbeat,
+            ]);
 
-        const stream = new FakeControlSocket(loginReply);
+            const stream = new FakeControlSocket(loginReply);
 
-        const connect = sinon.stub(net, "createConnection")
-            .callsFake(() => {
-                setImmediate(() => {
-                    stream.emit("connect");
-                    stream.push(response);
+            const connect = sinon.stub(net, "createConnection")
+                .callsFake(() => {
+                    setImmediate(() => {
+                        stream.emit("connect");
+                        stream.push(response);
+                    });
+
+                    return stream as unknown as net.Socket;
                 });
 
-                return stream as unknown as net.Socket;
-            });
+            const connection = await openSession(
+                device,
+                {},
+                credentials,
+            );
 
-        const connection = await openSession(
-            device,
-            {},
-            credentials,
-        );
+            // Verify the correct protocol endpoint was requested.
+            chai.expect(init.calledOnce).to.equal(true);
+            chai.expect(init.firstCall.args[0]).to.equal(
+                `http://127.0.0.1:9295${testDevice.initPath}`,
+            );
 
-        chai.expect(connect.calledOnce).to.equal(true);
-        chai.expect(connection.isConnected).to.equal(true);
-        chai.expect(stream.destroyed).to.equal(false);
+            const controlRequest = stream.written[0].toString("utf-8");
 
-        // TcpDeviceSocket owns the binary data listener after
-        // the HTTP handshake has completed.
-        chai.expect(stream.listenerCount("data")).to.equal(1);
+            chai.expect(controlRequest).to.include(
+                `GET ${testDevice.controlPath} HTTP/1.1\r\n`,
+            );
 
-        const packets = stream.written.filter(
-            data => data.length === 8,
-        );
+            chai.expect(controlRequest).to.include(
+                `RP-Version: ${testDevice.remotePlayVersion}\r\n`,
+            );
 
-        chai.expect(packets.some(
-            data => data.readUInt16BE(4) === RemotePlayCommand.Login,
-        )).to.equal(true);
+            // The dedicated socket must remain available to
+            // Remote Play after the HTTP handshake.
+            chai.expect(connect.calledOnce).to.equal(true);
+            chai.expect(connection.isConnected).to.equal(true);
+            chai.expect(stream.destroyed).to.equal(false);
+            chai.expect(stream.listenerCount("data")).to.equal(1);
 
-        chai.expect(packets.some(
-            data => data.readUInt16BE(4) === RemotePlayCommand.Heartbeat,
-        )).to.equal(true);
+            const packets = stream.written.filter(
+                data => data.length === 8,
+            );
 
-        await connection.close();
-        chai.expect(stream.destroyed).to.equal(true);
-    });
+            chai.expect(packets.some(
+                data => data.readUInt16BE(4) === RemotePlayCommand.Login,
+            )).to.equal(true);
+
+            chai.expect(packets.some(
+                data => data.readUInt16BE(4) === RemotePlayCommand.Heartbeat,
+            )).to.equal(true);
+
+            await connection.close();
+
+            chai.expect(stream.destroyed).to.equal(true);
+        });
+    }
 });

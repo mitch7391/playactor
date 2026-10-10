@@ -17,7 +17,7 @@ export function parseControlResponse(
     if (headerEnd === -1) {
         if (received.length > MAX_HTTP_HEADER_SIZE) {
             throw new Error(
-                "PS5 session control HTTP headers are too large",
+                "Remote Play session control HTTP headers are too large",
             );
         }
         return undefined;
@@ -25,7 +25,7 @@ export function parseControlResponse(
 
     if (headerEnd > MAX_HTTP_HEADER_SIZE) {
         throw new Error(
-            "PS5 session control HTTP headers are too large",
+            "Remote Play session control HTTP headers are too large",
         );
     }
 
@@ -37,7 +37,7 @@ export function parseControlResponse(
 
     if (!statusMatch) {
         throw new Error(
-            `Invalid PS5 session control response: ${statusLine}`,
+            `Invalid Remote Play session control response: ${statusLine}`,
         );
     }
 
@@ -61,7 +61,7 @@ export function parseControlResponse(
         const reason = headers["rp-application-reason"];
 
         throw new Error(
-            `PS5 session control HTTP ${statusCode}${
+            `Remote Play session control HTTP ${statusCode}${
                 reason ? ` (RP reason: ${reason})` : ""}`,
         );
     }
@@ -70,7 +70,7 @@ export function parseControlResponse(
 
     if (!encryptedServerType) {
         throw new Error(
-            "Missing PS5 session control RP-Server-Type header",
+            "Missing Remote Play session control RP-Server-Type header",
         );
     }
 

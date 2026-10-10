@@ -2,11 +2,10 @@ import * as chai from "chai";
 import net from "net";
 import sinon from "sinon";
 
-import { IRemotePlayCredentials } from "../../src/credentials/model";
-import { DeviceType, IDiscoveredDevice } from "../../src/discovery/model";
 import * as protocol from "../../src/remoteplay/protocol";
 import { openSession } from "../../src/remoteplay/session";
 import * as asyncUtil from "../../src/util/async";
+import { fakeRemotePlayCredentials, fakeRemotePlayDevice } from "./util";
 
 describe("RemotePlay session connection timing", () => {
     afterEach(() => {
@@ -14,30 +13,8 @@ describe("RemotePlay session connection timing", () => {
     });
 
     it("waits 200ms after session initialisation before connecting", async () => {
-        const device = {
-            type: DeviceType.PS5,
-            systemVersion: "14100003",
-            address: {
-                address: "127.0.0.1",
-                port: 9295,
-                family: "IPv4",
-            },
-        } as IDiscoveredDevice;
-
-        const credentials: IRemotePlayCredentials = {
-            "app-type": "r",
-            "auth-type": "R",
-            "client-type": "vr",
-            "user-credential": "test",
-            accountId: "test",
-            registration: {
-                "AP-Bssid": "test",
-                "AP-Name": "PS5",
-                "RP-KeyType": "2",
-                "RP-Key": "00112233445566778899aabbccddeeff",
-                "PS5-RegistKey": "00112233445566778899aabbccddeeff",
-            },
-        };
+        const device = fakeRemotePlayDevice();
+        const credentials = fakeRemotePlayCredentials();
 
         const request = sinon.stub(protocol, "request").resolves({
             headers: {

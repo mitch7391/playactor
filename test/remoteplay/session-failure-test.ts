@@ -2,41 +2,18 @@ import * as chai from "chai";
 import net from "net";
 import sinon from "sinon";
 
-import { IRemotePlayCredentials } from "../../src/credentials/model";
-import { DeviceType, IDiscoveredDevice } from "../../src/discovery/model";
 import * as protocol from "../../src/remoteplay/protocol";
 import { openSession } from "../../src/remoteplay/session";
 import * as asyncUtil from "../../src/util/async";
-
-const device = {
-    type: DeviceType.PS5,
-    systemVersion: "14100003",
-    address: {
-        address: "127.0.0.1",
-        port: 9295,
-        family: "IPv4",
-    },
-} as IDiscoveredDevice;
-
-const credentials: IRemotePlayCredentials = {
-    "app-type": "r",
-    "auth-type": "R",
-    "client-type": "vr",
-    "user-credential": "test",
-    accountId: "test",
-    registration: {
-        "AP-Bssid": "test",
-        "AP-Name": "PS5",
-        "RP-KeyType": "2",
-        "RP-Key": "00112233445566778899aabbccddeeff",
-        "PS5-RegistKey": "00112233445566778899aabbccddeeff",
-    },
-};
+import { fakeRemotePlayCredentials, fakeRemotePlayDevice } from "./util";
 
 async function expectHandshakeFailure(
     trigger: (socket: net.Socket) => void,
     expectedMessage: string,
 ) {
+    const device = fakeRemotePlayDevice();
+    const credentials = fakeRemotePlayCredentials();
+
     // This socket is never connected to a real network.
     const socket = new net.Socket();
     sinon.stub(socket, "write").returns(true);
@@ -101,7 +78,7 @@ describe("RemotePlay session connection failures", () => {
                     + "RP-Application-Reason: 80108b10\r\n\r\n",
                 ));
             },
-            "PS5 session control HTTP 403 (RP reason: 80108b10)",
+            "Remote Play session control HTTP 403 (RP reason: 80108b10)",
         );
     });
 
@@ -110,7 +87,7 @@ describe("RemotePlay session connection failures", () => {
             socket => {
                 socket.emit("timeout");
             },
-            "Timed out waiting for the PS5 session control response",
+            "Timed out waiting for the Remote Play session control response",
         );
     });
 
@@ -119,7 +96,7 @@ describe("RemotePlay session connection failures", () => {
             socket => {
                 socket.emit("end");
             },
-            "PS5 closed the session control connection before responding",
+            "Remote Play console closed the session control connection before responding",
         );
     });
 });

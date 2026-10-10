@@ -70,7 +70,7 @@ describe("parseControlResponse", () => {
         );
 
         chai.expect(() => parseControlResponse(received))
-            .to.throw("PS5 session control HTTP 403 (RP reason: 80108b02)");
+            .to.throw("Remote Play session control HTTP 403 (RP reason: 80108b02)");
     });
 
     it("rejects invalid HTTP status lines", () => {
@@ -79,7 +79,7 @@ describe("parseControlResponse", () => {
         );
 
         chai.expect(() => parseControlResponse(received))
-            .to.throw("Invalid PS5 session control response");
+            .to.throw("Invalid Remote Play session control response");
     });
 
     it("rejects responses without RP-Server-Type", () => {
@@ -88,14 +88,14 @@ describe("parseControlResponse", () => {
         );
 
         chai.expect(() => parseControlResponse(received))
-            .to.throw("Missing PS5 session control RP-Server-Type header");
+            .to.throw("Missing Remote Play session control RP-Server-Type header");
     });
 
     it("rejects oversized incomplete HTTP headers", () => {
         const received = Buffer.alloc(64 * 1024 + 1, 0x41);
 
         chai.expect(() => parseControlResponse(received))
-            .to.throw("PS5 session control HTTP headers are too large");
+            .to.throw("Remote Play session control HTTP headers are too large");
     });
 
     it("rejects oversized complete HTTP headers", () => {
@@ -106,6 +106,6 @@ describe("parseControlResponse", () => {
         ]);
 
         chai.expect(() => parseControlResponse(received))
-            .to.throw("PS5 session control HTTP headers are too large");
+            .to.throw("Remote Play session control HTTP headers are too large");
     });
 });
