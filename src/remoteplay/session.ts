@@ -7,6 +7,7 @@ import { IDiscoveredDevice } from "../discovery/model";
 import { TcpDeviceSocket } from "../socket/tcp";
 import { delayMillis } from "../util/async";
 import { RemotePlayPacketCodec } from "./codec";
+import { parseControlResponse } from "./control-response";
 import { pickCryptoStrategyForDevice } from "./crypto";
 import { RemotePlayVersion, remotePlayVersionFor, remotePlayVersionToString } from "./model";
 import { RemotePlayLoginProc } from "./proc/login";
@@ -27,7 +28,6 @@ const DID_SUFFIX = Buffer.from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
 const OS_TYPE = "Win10.0.0";
 
 const CONTROL_CONNECT_TIMEOUT = 15_000;
-const MAX_HTTP_HEADER_SIZE = 64 * 1024;
 
 /**
  * Step 1: initialize the session and fetch the server nonce.
@@ -83,7 +83,7 @@ function controlPathFor(device: IDiscoveredDevice) {
  * Step 2: establish the Remote Play control connection.
  *
  * The control endpoint starts with HTTP but continues using a
- * binary protocol over the SAME TCP connection.
+ * binary protocol over the same TCP connection.
  *
  * A normal HTTP client can return the connection to its agent,
  * unreference it or destroy it after the HTTP response finishes.
@@ -167,16 +167,7 @@ async function openControlSocket(
 
         let received = Buffer.alloc(0);
         let finished = false;
-
-        function cleanup() {
-            stream.removeListener("connect", onConnect);
-            stream.removeListener("data", onData);
-            stream.removeListener("error", onError);
-            stream.removeListener("end", onEnd);
-            stream.removeListener("close", onClose);
-            stream.removeListener("timeout", onTimeout);
-            stream.setTimeout(0);
-        }
+        let cleanup: () => void;
 
         function fail(error: Error) {
             if (finished) {
@@ -223,109 +214,33 @@ async function openControlSocket(
 
             received = Buffer.concat([received, data]);
 
-            const headerEnd = received.indexOf("\r\n\r\n");
-
-            if (headerEnd === -1) {
-                if (received.length > MAX_HTTP_HEADER_SIZE) {
-                    fail(new Error(
-                        "PS5 session control HTTP headers are too large",
-                    ));
-                }
-                return;
-            }
-
-            if (headerEnd > MAX_HTTP_HEADER_SIZE) {
-                fail(new Error(
-                    "PS5 session control HTTP headers are too large",
-                ));
-                return;
-            }
-
-            // Stop reading while the socket changes ownership.
-            stream.pause();
-
             try {
-                const headerText = received.slice(0, headerEnd)
-                    .toString("latin1");
+                const response = parseControlResponse(received);
 
-                const remainingData = received.slice(headerEnd + 4);
-
-                const lines = headerText.split("\r\n");
-                const statusLine = lines.shift() ?? "";
-
-                const statusMatch = /^HTTP\/1\.[01]\s+(\d{3})/.exec(
-                    statusLine,
-                );
-
-                if (!statusMatch) {
-                    throw new Error(
-                        `Invalid PS5 session control response: ${statusLine}`,
-                    );
+                if (!response) {
+                    return;
                 }
 
-                const statusCode = Number(statusMatch[1]);
-                const responseHeaders: Record<string, string> = {};
-
-                for (const line of lines) {
-                    const separator = line.indexOf(":");
-
-                    if (separator === -1) {
-                        continue;
-                    }
-
-                    const name = line.slice(0, separator)
-                        .trim()
-                        .toLowerCase();
-
-                    const value = line.slice(separator + 1).trim();
-
-                    responseHeaders[name] = value;
-                }
-
-                if (statusCode >= 300) {
-                    const reason = responseHeaders["rp-application-reason"];
-
-                    throw new Error(
-                        `PS5 session control HTTP ${statusCode}`
-                        + (reason ? ` (RP reason: ${reason})` : ""),
-                    );
-                }
-
-                const encodedServerType = responseHeaders["rp-server-type"];
-
-                if (!encodedServerType) {
-                    throw new Error(
-                        "Missing PS5 session control RP-Server-Type header",
-                    );
-                }
+                // Stop reading while the socket changes ownership.
+                stream.pause();
 
                 const serverType = codec.decodeBuffer(
-                    Buffer.from(encodedServerType, "base64"),
+                    Buffer.from(response.encryptedServerType, "base64"),
                 );
 
                 debug("received server type=", serverType);
 
-                // Preserve any binary Remote Play packets that arrived
-                // in the same TCP chunk as the HTTP response headers.
-                if (remainingData.length > 0) {
+                // Preserve binary packets received alongside HTTP headers.
+                if (response.remainingData.length > 0) {
                     debug(
                         "preserving",
-                        remainingData.length,
+                        response.remainingData.length,
                         "bytes received after HTTP headers",
                     );
-                    stream.unshift(remainingData);
+                    stream.unshift(response.remainingData);
                 }
 
-                debug("control socket before handover:", {
-                    destroyed: stream.destroyed,
-                    readable: stream.readable,
-                    writable: stream.writable,
-                    bytesRead: stream.bytesRead,
-                    bytesWritten: stream.bytesWritten,
-                });
-
-                // Remove only our HTTP-handshake listeners.
-                // Do not remove listeners belonging to the TCP socket.
+                // Remove only the HTTP-handshake listeners.
                 cleanup();
 
                 const connection = new TcpDeviceSocket(
@@ -340,7 +255,7 @@ async function openControlSocket(
 
                 debug("session control socket handed over to Remote Play");
 
-                // TcpDeviceSocket now owns all incoming binary packets.
+                // TcpDeviceSocket now owns incoming binary packets.
                 stream.resume();
 
                 resolve(connection);
@@ -350,6 +265,16 @@ async function openControlSocket(
                     : new Error(String(error)));
             }
         }
+
+        cleanup = () => {
+            stream.removeListener("connect", onConnect);
+            stream.removeListener("data", onData);
+            stream.removeListener("error", onError);
+            stream.removeListener("end", onEnd);
+            stream.removeListener("close", onClose);
+            stream.removeListener("timeout", onTimeout);
+            stream.setTimeout(0);
+        };
 
         stream.once("connect", onConnect);
         stream.on("data", onData);

@@ -72,34 +72,13 @@ export async function request(url: string, options: Options) {
     }
     debug("combined request headers:", redact(headers));
 
-let result;
-try {
-    result = await got(url, {
+    const result = await got(url, {
         ...options,
         headers,
         decompress: false,
         responseType: "buffer",
         throwHttpErrors: false,
     } as OptionsOfBufferResponseBody);
-} catch (error) {
-    const err = error as Error & {
-        code?: string;
-        cause?: Error;
-        timings?: {
-            phases?: Record<string, number | undefined>;
-        };
-    };
-
-    debug("HTTP request failed:", {
-        errorName: err.name,
-        errorCode: err.code,
-        errorMessage: err.message,
-        causeCode: (err.cause as Error & { code?: string })?.code,
-        timings: err.timings?.phases,
-    });
-
-    throw error;
-}
 
     debug("result headers:", redact(result.headers));
     debug("result body:", redact(result.body.toString("base64")));
