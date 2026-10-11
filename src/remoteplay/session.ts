@@ -59,6 +59,7 @@ async function initializeSession(
     device: IDiscoveredDevice,
     creds: IRemotePlayCredentials,
     waitForSocketClose: boolean,
+    onResponseCompleted?: (at: bigint) => void,
 ) {
     const version = remotePlayVersionFor(device);
     const path = version < RemotePlayVersion.PS4_10
@@ -77,7 +78,7 @@ async function initializeSession(
             "RP-RegistKey": registKey,
             "RP-Version": remotePlayVersionToString(version),
         },
-    }, waitForSocketClose);
+    }, waitForSocketClose, onResponseCompleted);
 
     const nonceBase64 = response.headers["rp-nonce"];
     debug("session init nonce=", nonceBase64);
@@ -347,13 +348,23 @@ export async function openSession(
         useSocketCloseHandover ? "enabled" : "disabled",
     );
 
+    let initCompletedAt = process.hrtime.bigint();
+
     const nonce = await initializeSession(
         device,
         creds,
         useSocketCloseHandover,
+        at => {
+            if (useSocketCloseHandover) {
+                initCompletedAt = at;
+            }
+        },
     );
 
-    const initCompletedAt = process.hrtime.bigint();
+    // Preserve the original timing reference in normal mode.
+    if (!useSocketCloseHandover) {
+        initCompletedAt = process.hrtime.bigint();
+    }
 
     if (useSocketCloseHandover) {
         debug("initial HTTP socket closed; no fixed delay required");

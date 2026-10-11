@@ -68,6 +68,7 @@ export async function request(
     url: string,
     options: Options,
     waitForSocketClose = false,
+    onResponseCompleted?: (at: bigint) => void,
 ) {
     if (debug.enabled) {
         debug("performing ", options.method ?? "GET", url);
@@ -135,6 +136,9 @@ export async function request(
     try {
         const result = await operation;
 
+        const responseCompletedAt = process.hrtime.bigint();
+        onResponseCompleted?.(responseCompletedAt);
+
         debug("result headers:", redact(result.headers));
         debug("result body:", redact(result.body.toString("base64")));
 
@@ -158,8 +162,6 @@ export async function request(
                     "Unable to observe initial Remote Play HTTP socket",
                 );
             }
-
-            const responseCompletedAt = process.hrtime.bigint();
 
             await handover.wait();
 
