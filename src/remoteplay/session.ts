@@ -52,12 +52,13 @@ function controlDelayMs(): number {
 /**
  * Step 1: initialize the session and fetch the server nonce.
  *
- * This is an ordinary HTTP request. The connection is not needed
- * after the response, so the existing HTTP client can handle it.
+ * In experimental handover mode, explicitly close the initial
+ * HTTP connection and await its socket close event.
  */
 async function initializeSession(
     device: IDiscoveredDevice,
     creds: IRemotePlayCredentials,
+    waitForSocketClose: boolean,
 ) {
     const version = remotePlayVersionFor(device);
     const path = version < RemotePlayVersion.PS4_10
@@ -66,6 +67,7 @@ async function initializeSession(
 
     const registKey = creds.registration["PS5-RegistKey"]
         ?? creds.registration["PS4-RegistKey"];
+
     if (!registKey) {
         throw new Error("Invalid credentials: missing RegistKey");
     }
@@ -75,15 +77,17 @@ async function initializeSession(
             "RP-RegistKey": registKey,
             "RP-Version": remotePlayVersionToString(version),
         },
-    });
+    }, waitForSocketClose);
 
     const nonceBase64 = response.headers["rp-nonce"];
     debug("session init nonce=", nonceBase64);
+
     if (typeof nonceBase64 !== "string") {
         throw new Error(`Unexpected nonce format: "${nonceBase64}"`);
     }
 
     const nonce = Buffer.from(nonceBase64, "base64");
+
     if (nonce.length !== CRYPTO_NONCE_LENGTH) {
         throw new Error(`Unexpected nonce length: ${nonce.length}`);
     }
@@ -105,12 +109,9 @@ function controlPathFor(device: IDiscoveredDevice) {
  * The control endpoint starts with HTTP but continues using a
  * binary protocol over the same TCP connection.
  *
- * A normal HTTP client can return the connection to its agent,
- * unreference it or destroy it after the HTTP response finishes.
- *
- * Use a dedicated TCP socket instead. Read only the HTTP headers,
- * preserve any binary data received with them, and hand the socket
- * directly to TcpDeviceSocket.
+ * Use a dedicated TCP socket. Read only the HTTP headers,
+ * preserve any binary data received with them, and hand the
+ * socket directly to TcpDeviceSocket.
  */
 async function openControlSocket(
     device: IDiscoveredDevice,
@@ -126,6 +127,7 @@ async function openControlSocket(
 
     const registKey = creds.registration["PS5-RegistKey"]
         ?? creds.registration["PS4-RegistKey"];
+
     if (!registKey) {
         throw new Error("Missing RegistKey?");
     }
@@ -142,8 +144,7 @@ async function openControlSocket(
 
     const version = remotePlayVersionFor(device);
 
-    // Preserve the original encryption order. These calls advance
-    // the Remote Play encryption counter.
+    // Preserve encryption order: these calls advance the counter.
     const headers: Record<string, string> = {
         "RP-Auth": encrypt(padBuffer(parseHexBytes(registKey), CRYPTO_NONCE_LENGTH)),
         "RP-Version": remotePlayVersionToString(version),
@@ -269,7 +270,6 @@ async function openControlSocket(
 
                 debug("received server type=", serverType);
 
-                // Preserve binary packets received alongside HTTP headers.
                 if (response.remainingData.length > 0) {
                     debug(
                         "preserving",
@@ -279,7 +279,6 @@ async function openControlSocket(
                     stream.unshift(response.remainingData);
                 }
 
-                // Remove only the HTTP-handshake listeners.
                 cleanup();
 
                 const connection = new TcpDeviceSocket(
@@ -294,7 +293,6 @@ async function openControlSocket(
 
                 debug("session control socket handed over to Remote Play");
 
-                // TcpDeviceSocket now owns incoming binary packets.
                 stream.resume();
 
                 resolve(connection);
@@ -334,15 +332,39 @@ export async function openSession(
     config: IConnectionConfig,
     creds: IRemotePlayCredentials,
 ) {
-    const nonce = await initializeSession(device, creds);
+    const handoverMode = process.env.PLAYACTOR_RP_HANDOVER;
+
+    if (handoverMode !== undefined && handoverMode !== "socket-close") {
+        throw new Error(
+            "PLAYACTOR_RP_HANDOVER must be socket-close when set",
+        );
+    }
+
+    const useSocketCloseHandover = handoverMode === "socket-close";
+
+    debug(
+        "initial HTTP socket-close handover: %s",
+        useSocketCloseHandover ? "enabled" : "disabled",
+    );
+
+    const nonce = await initializeSession(
+        device,
+        creds,
+        useSocketCloseHandover,
+    );
+
     const initCompletedAt = process.hrtime.bigint();
-    const delayMs = controlDelayMs();
 
-    debug("configured Remote Play control delay: %d ms", delayMs);
+    if (useSocketCloseHandover) {
+        debug("initial HTTP socket closed; no fixed delay required");
+    } else {
+        const delayMs = controlDelayMs();
 
-    // Experimental: allow a zero-delay connection attempt.
-    if (delayMs > 0) {
-        await delayMillis(delayMs);
+        debug("configured Remote Play control delay: %d ms", delayMs);
+
+        if (delayMs > 0) {
+            await delayMillis(delayMs);
+        }
     }
 
     const socket = await openControlSocket(
@@ -355,5 +377,6 @@ export async function openSession(
     await socket.execute(new RemotePlayLoginProc(config));
 
     debug("RemotePlaySession ready!");
+
     return socket;
 }

@@ -1,4 +1,6 @@
 import _debug from "debug";
+import { ClientRequest } from "http";
+import { Socket } from "net";
 import got, { Options, OptionsOfBufferResponseBody } from "got";
 
 import { IDiscoveredDevice } from "../discovery/model";
@@ -13,6 +15,7 @@ import {
 } from "./packets";
 import { RemotePlayLoginResultPacket } from "./packets/login-result";
 import { RemotePlayPasscodeRequestPacket } from "./packets/passcode-request";
+import { SocketCloseHandover } from "./socket-close-handover";
 
 const debug = _debug("playactor:remoteplay:protocol");
 
@@ -53,7 +56,19 @@ export function parseBody<R>(body: Buffer): R {
     }, {} as any) as R;
 }
 
-export async function request(url: string, options: Options) {
+/**
+ * Optionally wait for the initial HTTP connection to close.
+ *
+ * The socket is observed as soon as Got assigns it, so its
+ * close event cannot be missed after the HTTP response.
+ *
+ * Ordinary requests retain their existing behaviour.
+ */
+export async function request(
+    url: string,
+    options: Options,
+    waitForSocketClose = false,
+) {
     if (debug.enabled) {
         debug("performing ", options.method ?? "GET", url);
         const withoutAgent = { ...options };
@@ -65,39 +80,115 @@ export async function request(url: string, options: Options) {
         "User-Agent": "remoteplay Windows",
         ...options.headers,
     };
+
     if (!headers["Content-Length"] && !options.method) {
         // NOTE: We *must* specify Content-Length: 0 for GET requests,
-        // or else get a 403 response for some reason
+        // or else we get a 403 response for some reason
         headers["Content-Length"] = "0";
     }
+
+    if (waitForSocketClose) {
+        headers.Connection = "close";
+    }
+
     debug("combined request headers:", redact(headers));
 
-    const result = await got(url, {
+    const operation = got(url, {
         ...options,
         headers,
         decompress: false,
         responseType: "buffer",
         throwHttpErrors: false,
+        ...(waitForSocketClose ? {
+            retry: { limit: 0 },
+            followRedirect: false,
+        } : {}),
     } as OptionsOfBufferResponseBody);
 
-    debug("result headers:", redact(result.headers));
-    debug("result body:", redact(result.body.toString("base64")));
+    let handover: SocketCloseHandover | undefined;
+    let initialSocket: Socket | undefined;
 
-    if (result.statusCode >= 300) {
-        let message = `Registration error: ${result.statusCode}: ${result.statusMessage}`;
+    // Keep track of the request while its socket is being assigned.
+    // This allows us to remove an unused listener if Got fails early.
+    let pendingRequest: ClientRequest | undefined;
+    let pendingSocketListener: ((socket: Socket) => void) | undefined;
 
-        const reasonCode = result.headers["rp-application-reason"];
-        if (reasonCode && !Array.isArray(reasonCode)) {
-            const reason = errorReasonString(reasonCode);
-            if (reason) {
-                message += `: ${reason}`;
+    if (waitForSocketClose) {
+        operation.on("request", (clientRequest: ClientRequest) => {
+            const observeSocket = (socket: Socket) => {
+                initialSocket = socket;
+                handover = new SocketCloseHandover(socket);
+                pendingRequest = undefined;
+                pendingSocketListener = undefined;
+            };
+
+            if (clientRequest.socket) {
+                observeSocket(clientRequest.socket);
+            } else {
+                pendingRequest = clientRequest;
+                pendingSocketListener = observeSocket;
+                clientRequest.once("socket", observeSocket);
             }
-        }
-
-        throw new Error(message);
+        });
     }
 
-    return result;
+    try {
+        const result = await operation;
+
+        debug("result headers:", redact(result.headers));
+        debug("result body:", redact(result.body.toString("base64")));
+
+        if (result.statusCode >= 300) {
+            let message = `Registration error: ${result.statusCode}: ${result.statusMessage}`;
+
+            const reasonCode = result.headers["rp-application-reason"];
+            if (reasonCode && !Array.isArray(reasonCode)) {
+                const reason = errorReasonString(reasonCode);
+                if (reason) {
+                    message += `: ${reason}`;
+                }
+            }
+
+            throw new Error(message);
+        }
+
+        if (waitForSocketClose) {
+            if (!handover) {
+                throw new Error(
+                    "Unable to observe initial Remote Play HTTP socket",
+                );
+            }
+
+            const responseCompletedAt = process.hrtime.bigint();
+
+            await handover.wait();
+
+            const elapsedMs = Number(
+                process.hrtime.bigint() - responseCompletedAt,
+            ) / 1_000_000;
+
+            debug(
+                "initial HTTP socket close handover completed in %s ms",
+                elapsedMs.toFixed(2),
+            );
+        }
+
+        return result;
+    } catch (error) {
+        if (waitForSocketClose) {
+            if (pendingRequest && pendingSocketListener) {
+                pendingRequest.removeListener(
+                    "socket",
+                    pendingSocketListener,
+                );
+            }
+
+            handover?.cancel();
+            initialSocket?.destroy();
+        }
+
+        throw error;
+    }
 }
 
 export function typedPath(device: IDiscoveredDevice, path: string) {
