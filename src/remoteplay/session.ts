@@ -28,6 +28,26 @@ const DID_SUFFIX = Buffer.from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
 const OS_TYPE = "Win10.0.0";
 
 const CONTROL_CONNECT_TIMEOUT = 15_000;
+const DEFAULT_CONTROL_DELAY_MS = 200;
+const MAX_CONTROL_DELAY_MS = 2000;
+
+function controlDelayMs(): number {
+    const configured = process.env.PLAYACTOR_RP_DELAY_MS;
+    const delay = configured === undefined
+        ? DEFAULT_CONTROL_DELAY_MS
+        : Number(configured);
+
+    if (configured === ""
+        || !Number.isInteger(delay)
+        || delay < 0
+        || delay > MAX_CONTROL_DELAY_MS) {
+        throw new Error(
+            "PLAYACTOR_RP_DELAY_MS must be an integer between 0 and 2000",
+        );
+    }
+
+    return delay;
+}
 
 /**
  * Step 1: initialize the session and fetch the server nonce.
@@ -96,6 +116,7 @@ async function openControlSocket(
     device: IDiscoveredDevice,
     creds: IRemotePlayCredentials,
     nonce: Buffer,
+    initCompletedAt: bigint,
 ): Promise<TcpDeviceSocket> {
     const codec = new RemotePlayPacketCodec(
         pickCryptoStrategyForDevice(device),
@@ -160,6 +181,16 @@ async function openControlSocket(
     debug("sending session control request...");
 
     return new Promise<TcpDeviceSocket>((resolve, reject) => {
+        const connectRequestedAt = process.hrtime.bigint();
+        const elapsedMs = Number(
+            connectRequestedAt - initCompletedAt,
+        ) / 1_000_000;
+
+        debug(
+            "control TCP attempt %s ms after session init",
+            elapsedMs.toFixed(2),
+        );
+
         const stream = net.createConnection({
             host,
             port: REST_PORT,
@@ -181,7 +212,15 @@ async function openControlSocket(
         }
 
         function onConnect() {
-            debug("session control TCP connection established");
+            const connectMs = Number(
+                process.hrtime.bigint() - connectRequestedAt,
+            ) / 1_000_000;
+
+            debug(
+                "session control TCP connection established in %s ms",
+                connectMs.toFixed(2),
+            );
+
             stream.write(requestText);
         }
 
@@ -296,13 +335,22 @@ export async function openSession(
     creds: IRemotePlayCredentials,
 ) {
     const nonce = await initializeSession(device, creds);
+    const initCompletedAt = process.hrtime.bigint();
+    const delayMs = controlDelayMs();
 
-    // Allow the console to release the initial HTTP connection.
-    // This delay resolved the TCP connection reset under Node.js 24.
-    debug("waiting 200ms before opening session control connection...");
-    await delayMillis(200);
+    debug("configured Remote Play control delay: %d ms", delayMs);
 
-    const socket = await openControlSocket(device, creds, nonce);
+    // Experimental: allow a zero-delay connection attempt.
+    if (delayMs > 0) {
+        await delayMillis(delayMs);
+    }
+
+    const socket = await openControlSocket(
+        device,
+        creds,
+        nonce,
+        initCompletedAt,
+    );
 
     await socket.execute(new RemotePlayLoginProc(config));
 
