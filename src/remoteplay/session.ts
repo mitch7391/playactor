@@ -30,6 +30,7 @@ const OS_TYPE = "Win10.0.0";
 const CONTROL_CONNECT_TIMEOUT = 15_000;
 const DEFAULT_CONTROL_DELAY_MS = 200;
 const MAX_CONTROL_DELAY_MS = 2000;
+const INITIAL_HTTP_TIMEOUT_MS = 30_000;
 
 function controlDelayMs(): number {
     const configured = process.env.PLAYACTOR_RP_DELAY_MS;
@@ -78,6 +79,9 @@ async function initializeSession(
             "RP-RegistKey": registKey,
             "RP-Version": remotePlayVersionToString(version),
         },
+        ...(waitForSocketClose ? {
+            timeout: { request: INITIAL_HTTP_TIMEOUT_MS },
+        } : {}),
     }, waitForSocketClose, onResponseCompleted);
 
     const nonceBase64 = response.headers["rp-nonce"];
