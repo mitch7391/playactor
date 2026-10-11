@@ -2,6 +2,7 @@ import * as chai from "chai";
 import net from "net";
 import sinon from "sinon";
 
+import { DeviceType } from "../../src/discovery/model";
 import * as protocol from "../../src/remoteplay/protocol";
 import { openSession } from "../../src/remoteplay/session";
 import * as asyncUtil from "../../src/util/async";
@@ -54,15 +55,10 @@ describe("Remote Play session handover selection", () => {
             (error: Error) => error,
         );
 
-        // The session must request socket-close handover.
         chai.expect(request.calledOnce).to.equal(true);
         chai.expect(request.firstCall.args[2]).to.equal(true);
-
-        // The control connection must not start while the
-        // initial HTTP request/handover is still pending.
         chai.expect(connect.notCalled).to.equal(true);
 
-        // Simulate the completed HTTP handover.
         releaseInitialization({
             headers: {
                 "rp-nonce": Buffer.alloc(16, 0x42).toString("base64"),
@@ -70,8 +66,6 @@ describe("Remote Play session handover selection", () => {
         });
 
         chai.expect(await outcome).to.equal(simulatedError);
-
-        // No arbitrary delay must be introduced.
         chai.expect(delay.notCalled).to.equal(true);
         chai.expect(connect.calledOnce).to.equal(true);
     });
@@ -127,4 +121,69 @@ describe("Remote Play session handover selection", () => {
         chai.expect(request.notCalled).to.equal(true);
         chai.expect(connect.notCalled).to.equal(true);
     });
+
+    const ps4Versions = [
+        {
+            name: "10.0",
+            systemVersion: "11000000",
+            initPath: "/sie/ps4/rp/sess/init",
+        },
+        {
+            name: "9.0",
+            systemVersion: "07000000",
+            initPath: "/sce/rp/session",
+        },
+        {
+            name: "8.0",
+            systemVersion: "06000000",
+            initPath: "/sce/rp/session",
+        },
+    ];
+
+    for (const ps4 of ps4Versions) {
+        it(`configures socket-close handover for PS4 ${ps4.name}`, async () => {
+            process.env.PLAYACTOR_RP_HANDOVER = "socket-close";
+
+            const simulatedError = new Error(
+                "Simulated PS4 HTTP initialization failure",
+            );
+
+            const request = sinon.stub(protocol, "request")
+                .rejects(simulatedError);
+
+            const connect = sinon.stub(net, "createConnection");
+            const delay = sinon.stub(asyncUtil, "delayMillis");
+
+            const outcome = await openSession(
+                fakeRemotePlayDevice(
+                    DeviceType.PS4,
+                    ps4.systemVersion,
+                ),
+                {},
+                fakeRemotePlayCredentials(DeviceType.PS4),
+            ).then(
+                () => undefined,
+                (error: Error) => error,
+            );
+
+            chai.expect(outcome).to.equal(simulatedError);
+            chai.expect(request.calledOnce).to.equal(true);
+
+            chai.expect(request.firstCall.args[0]).to.equal(
+                `http://127.0.0.1:9295${ps4.initPath}`,
+            );
+
+            chai.expect(
+                request.firstCall.args[1].headers?.["RP-Version"],
+            ).to.equal(ps4.name);
+
+            chai.expect(request.firstCall.args[1].timeout).to.deep.equal({
+                request: 30_000,
+            });
+
+            chai.expect(request.firstCall.args[2]).to.equal(true);
+            chai.expect(connect.notCalled).to.equal(true);
+            chai.expect(delay.notCalled).to.equal(true);
+        });
+    }
 });
